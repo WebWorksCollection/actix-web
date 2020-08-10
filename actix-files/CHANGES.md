@@ -1,5 +1,31 @@
 # Changes
 
+## [Unreleased] - 2020-xx-xx
+
+## [0.3.0-beta.1] - 2020-07-15
+* Update `v_htmlescape` to 0.10
+* Update `actix-web` and `actix-http` dependencies to beta.1
+
+## [0.3.0-alpha.1] - 2020-05-23
+* Update `actix-web` and `actix-http` dependencies to alpha
+* Fix some typos in the docs
+* Bump minimum supported Rust version to 1.40
+* Support sending Content-Length when Content-Range is specified [#1384]
+
+[#1384]: https://github.com/actix/actix-web/pull/1384
+
+## [0.2.1] - 2019-12-22
+
+* Use the same format for file URLs regardless of platforms
+
+## [0.2.0] - 2019-12-20
+
+* Fix BodyEncoding trait import #1220
+
+## [0.2.0-alpha.1] - 2019-12-07
+
+* Migrate to `std::future`
+
 ## [0.1.7] - 2019-11-06
 
 * Add an additional `filename*` param in the `Content-Disposition` header of `actix_files::NamedFile` to be more compatible. (#1151)

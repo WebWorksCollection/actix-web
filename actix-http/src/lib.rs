@@ -1,20 +1,24 @@
 //! Basic http primitives for actix-net framework.
+#![warn(rust_2018_idioms, warnings)]
 #![allow(
     clippy::type_complexity,
     clippy::too_many_arguments,
     clippy::new_without_default,
-    clippy::borrow_interior_mutable_const,
-    clippy::write_with_newline
+    clippy::borrow_interior_mutable_const
 )]
 
 #[macro_use]
 extern crate log;
+
+#[macro_use]
+mod macros;
 
 pub mod body;
 mod builder;
 pub mod client;
 mod cloneable;
 mod config;
+#[cfg(feature = "compress")]
 pub mod encoding;
 mod extensions;
 mod header;
@@ -26,8 +30,9 @@ mod payload;
 mod request;
 mod response;
 mod service;
+mod time_parser;
 
-pub mod cookie;
+pub use cookie;
 pub mod error;
 pub mod h1;
 pub mod h2;
@@ -51,7 +56,7 @@ pub mod http {
     // re-exports
     pub use http::header::{HeaderName, HeaderValue};
     pub use http::uri::PathAndQuery;
-    pub use http::{uri, Error, HttpTryFrom, Uri};
+    pub use http::{uri, Error, Uri};
     pub use http::{Method, StatusCode, Version};
 
     pub use crate::cookie::{Cookie, CookieBuilder};
@@ -63,4 +68,11 @@ pub mod http {
     }
     pub use crate::header::ContentEncoding;
     pub use crate::message::ConnectionType;
+}
+
+/// Http protocol
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Protocol {
+    Http1,
+    Http2,
 }

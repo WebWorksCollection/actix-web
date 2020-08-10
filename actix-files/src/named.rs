@@ -8,16 +8,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::unix::fs::MetadataExt;
 
 use bitflags::bitflags;
-use mime;
 use mime_guess::from_path;
 
 use actix_http::body::SizedStream;
+use actix_web::dev::BodyEncoding;
 use actix_web::http::header::{
     self, Charset, ContentDisposition, DispositionParam, DispositionType, ExtendedValue,
 };
 use actix_web::http::{ContentEncoding, StatusCode};
-use actix_web::middleware::BodyEncoding;
 use actix_web::{Error, HttpMessage, HttpRequest, HttpResponse, Responder};
+use futures_util::future::{ready, Ready};
 
 use crate::range::HttpRange;
 use crate::ChunkedReadFile;
@@ -89,7 +89,7 @@ impl NamedFile {
             };
 
             let ct = from_path(&path).first_or_octet_stream();
-            let disposition_type = match ct.type_() {
+            let disposition = match ct.type_() {
                 mime::IMAGE | mime::TEXT | mime::VIDEO => DispositionType::Inline,
                 _ => DispositionType::Attachment,
             };
@@ -103,8 +103,8 @@ impl NamedFile {
                 }))
             }
             let cd = ContentDisposition {
-                disposition: disposition_type,
-                parameters: parameters,
+                disposition,
+                parameters,
             };
             (ct, cd)
         };
@@ -255,62 +255,8 @@ impl NamedFile {
     pub(crate) fn last_modified(&self) -> Option<header::HttpDate> {
         self.modified.map(|mtime| mtime.into())
     }
-}
 
-impl Deref for NamedFile {
-    type Target = File;
-
-    fn deref(&self) -> &File {
-        &self.file
-    }
-}
-
-impl DerefMut for NamedFile {
-    fn deref_mut(&mut self) -> &mut File {
-        &mut self.file
-    }
-}
-
-/// Returns true if `req` has no `If-Match` header or one which matches `etag`.
-fn any_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
-    match req.get_header::<header::IfMatch>() {
-        None | Some(header::IfMatch::Any) => true,
-        Some(header::IfMatch::Items(ref items)) => {
-            if let Some(some_etag) = etag {
-                for item in items {
-                    if item.strong_eq(some_etag) {
-                        return true;
-                    }
-                }
-            }
-            false
-        }
-    }
-}
-
-/// Returns true if `req` doesn't have an `If-None-Match` header matching `req`.
-fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
-    match req.get_header::<header::IfNoneMatch>() {
-        Some(header::IfNoneMatch::Any) => false,
-        Some(header::IfNoneMatch::Items(ref items)) => {
-            if let Some(some_etag) = etag {
-                for item in items {
-                    if item.weak_eq(some_etag) {
-                        return false;
-                    }
-                }
-            }
-            true
-        }
-        None => true,
-    }
-}
-
-impl Responder for NamedFile {
-    type Error = Error;
-    type Future = Result<HttpResponse, Error>;
-
-    fn respond_to(self, req: &HttpRequest) -> Self::Future {
+    pub fn into_response(self, req: &HttpRequest) -> Result<HttpResponse, Error> {
         if self.status_code != StatusCode::OK {
             let mut resp = HttpResponse::build(self.status_code);
             resp.set(header::ContentType(self.content_type.clone()))
@@ -441,9 +387,69 @@ impl Responder for NamedFile {
             fut: None,
             counter: 0,
         };
+
         if offset != 0 || length != self.md.len() {
-            return Ok(resp.status(StatusCode::PARTIAL_CONTENT).streaming(reader));
-        };
+            resp.status(StatusCode::PARTIAL_CONTENT);
+        }
+
         Ok(resp.body(SizedStream::new(length, reader)))
+    }
+}
+
+impl Deref for NamedFile {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.file
+    }
+}
+
+impl DerefMut for NamedFile {
+    fn deref_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+}
+
+/// Returns true if `req` has no `If-Match` header or one which matches `etag`.
+fn any_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
+    match req.get_header::<header::IfMatch>() {
+        None | Some(header::IfMatch::Any) => true,
+        Some(header::IfMatch::Items(ref items)) => {
+            if let Some(some_etag) = etag {
+                for item in items {
+                    if item.strong_eq(some_etag) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Returns true if `req` doesn't have an `If-None-Match` header matching `req`.
+fn none_match(etag: Option<&header::EntityTag>, req: &HttpRequest) -> bool {
+    match req.get_header::<header::IfNoneMatch>() {
+        Some(header::IfNoneMatch::Any) => false,
+        Some(header::IfNoneMatch::Items(ref items)) => {
+            if let Some(some_etag) = etag {
+                for item in items {
+                    if item.weak_eq(some_etag) {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+        None => true,
+    }
+}
+
+impl Responder for NamedFile {
+    type Error = Error;
+    type Future = Ready<Result<HttpResponse, Error>>;
+
+    fn respond_to(self, req: &HttpRequest) -> Self::Future {
+        ready(self.into_response(req))
     }
 }

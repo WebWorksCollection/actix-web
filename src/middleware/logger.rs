@@ -1,21 +1,24 @@
 //! Request logging middleware
 use std::collections::HashSet;
+use std::convert::TryFrom;
 use std::env;
 use std::fmt::{self, Display, Formatter};
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll};
 
 use actix_service::{Service, Transform};
 use bytes::Bytes;
-use futures::future::{ok, FutureResult};
-use futures::{Async, Future, Poll};
+use futures_util::future::{ok, Ready};
 use log::debug;
 use regex::Regex;
-use time;
+use time::OffsetDateTime;
 
 use crate::dev::{BodySize, MessageBody, ResponseBody};
 use crate::error::{Error, Result};
-use crate::http::{HeaderName, HttpTryFrom, StatusCode};
+use crate::http::{HeaderName, StatusCode};
 use crate::service::{ServiceRequest, ServiceResponse};
 use crate::HttpResponse;
 
@@ -69,11 +72,20 @@ use crate::HttpResponse;
 ///
 /// `%U`  Request URL
 ///
+/// `%{r}a`  Real IP remote address **\***
+///
 /// `%{FOO}i`  request.headers['FOO']
 ///
 /// `%{FOO}o`  response.headers['FOO']
 ///
 /// `%{FOO}e`  os.environ['FOO']
+///
+/// # Security
+///  **\*** It is calculated using
+///  [`ConnectionInfo::realip_remote_addr()`](../dev/struct.ConnectionInfo.html#method.realip_remote_addr)
+///
+///  If you use this value ensure that all requests come from trusted hosts, since it is trivial
+///  for the remote client to simulate been another client.
 ///
 pub struct Logger(Rc<Inner>);
 
@@ -125,7 +137,7 @@ where
     type Error = Error;
     type InitError = ();
     type Transform = LoggerMiddleware<S>;
-    type Future = FutureResult<Self::Transform, Self::InitError>;
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
         ok(LoggerMiddleware {
@@ -151,8 +163,8 @@ where
     type Error = Error;
     type Future = LoggerResponse<S, B>;
 
-    fn poll_ready(&mut self) -> Poll<(), Self::Error> {
-        self.service.poll_ready()
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.service.poll_ready(cx)
     }
 
     fn call(&mut self, req: ServiceRequest) -> Self::Future {
@@ -160,11 +172,11 @@ where
             LoggerResponse {
                 fut: self.service.call(req),
                 format: None,
-                time: time::now(),
+                time: OffsetDateTime::now_utc(),
                 _t: PhantomData,
             }
         } else {
-            let now = time::now();
+            let now = OffsetDateTime::now_utc();
             let mut format = self.inner.format.clone();
 
             for unit in &mut format.0 {
@@ -181,13 +193,15 @@ where
 }
 
 #[doc(hidden)]
+#[pin_project::pin_project]
 pub struct LoggerResponse<S, B>
 where
     B: MessageBody,
     S: Service,
 {
+    #[pin]
     fut: S::Future,
-    time: time::Tm,
+    time: OffsetDateTime,
     format: Option<Format>,
     _t: PhantomData<(B,)>,
 }
@@ -197,11 +211,15 @@ where
     B: MessageBody,
     S: Service<Request = ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
 {
-    type Item = ServiceResponse<StreamLog<B>>;
-    type Error = Error;
+    type Output = Result<ServiceResponse<StreamLog<B>>, Error>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let res = futures::try_ready!(self.fut.poll());
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+
+        let res = match futures_util::ready!(this.fut.poll(cx)) {
+            Ok(res) => res,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
 
         if let Some(error) = res.response().error() {
             if res.response().head().status != StatusCode::INTERNAL_SERVER_ERROR {
@@ -209,34 +227,42 @@ where
             }
         }
 
-        if let Some(ref mut format) = self.format {
+        if let Some(ref mut format) = this.format {
             for unit in &mut format.0 {
                 unit.render_response(res.response());
             }
         }
 
-        Ok(Async::Ready(res.map_body(move |_, body| {
+        let time = *this.time;
+        let format = this.format.take();
+
+        Poll::Ready(Ok(res.map_body(move |_, body| {
             ResponseBody::Body(StreamLog {
                 body,
+                time,
+                format,
                 size: 0,
-                time: self.time,
-                format: self.format.take(),
             })
         })))
     }
 }
 
+use pin_project::{pin_project, pinned_drop};
+
+#[pin_project(PinnedDrop)]
 pub struct StreamLog<B> {
+    #[pin]
     body: ResponseBody<B>,
     format: Option<Format>,
     size: usize,
-    time: time::Tm,
+    time: OffsetDateTime,
 }
 
-impl<B> Drop for StreamLog<B> {
-    fn drop(&mut self) {
+#[pinned_drop]
+impl<B> PinnedDrop for StreamLog<B> {
+    fn drop(self: Pin<&mut Self>) {
         if let Some(ref format) = self.format {
-            let render = |fmt: &mut Formatter| {
+            let render = |fmt: &mut Formatter<'_>| {
                 for unit in &format.0 {
                     unit.render(fmt, self.size, self.time)?;
                 }
@@ -252,13 +278,17 @@ impl<B: MessageBody> MessageBody for StreamLog<B> {
         self.body.size()
     }
 
-    fn poll_next(&mut self) -> Poll<Option<Bytes>, Error> {
-        match self.body.poll_next()? {
-            Async::Ready(Some(chunk)) => {
-                self.size += chunk.len();
-                Ok(Async::Ready(Some(chunk)))
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, Error>>> {
+        let this = self.project();
+        match this.body.poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                *this.size += chunk.len();
+                Poll::Ready(Some(Ok(chunk)))
             }
-            val => Ok(val),
+            val => val,
         }
     }
 }
@@ -282,7 +312,7 @@ impl Format {
     /// Returns `None` if the format string syntax is incorrect.
     pub fn new(s: &str) -> Format {
         log::trace!("Access log format: {}", s);
-        let fmt = Regex::new(r"%(\{([A-Za-z0-9\-_]+)\}([ioe])|[atPrUsbTD]?)").unwrap();
+        let fmt = Regex::new(r"%(\{([A-Za-z0-9\-_]+)\}([aioe])|[atPrUsbTD]?)").unwrap();
 
         let mut idx = 0;
         let mut results = Vec::new();
@@ -296,6 +326,13 @@ impl Format {
 
             if let Some(key) = cap.get(2) {
                 results.push(match cap.get(3).unwrap().as_str() {
+                    "a" => {
+                        if key.as_str() == "r" {
+                            FormatText::RealIPRemoteAddr
+                        } else {
+                            unreachable!()
+                        }
+                    }
                     "i" => FormatText::RequestHeader(
                         HeaderName::try_from(key.as_str()).unwrap(),
                     ),
@@ -343,6 +380,7 @@ pub enum FormatText {
     Time,
     TimeMillis,
     RemoteAddr,
+    RealIPRemoteAddr,
     UrlPath,
     RequestHeader(HeaderName),
     ResponseHeader(HeaderName),
@@ -352,22 +390,22 @@ pub enum FormatText {
 impl FormatText {
     fn render(
         &self,
-        fmt: &mut Formatter,
+        fmt: &mut Formatter<'_>,
         size: usize,
-        entry_time: time::Tm,
+        entry_time: OffsetDateTime,
     ) -> Result<(), fmt::Error> {
         match *self {
             FormatText::Str(ref string) => fmt.write_str(string),
             FormatText::Percent => "%".fmt(fmt),
             FormatText::ResponseSize => size.fmt(fmt),
             FormatText::Time => {
-                let rt = time::now() - entry_time;
-                let rt = (rt.num_nanoseconds().unwrap_or(0) as f64) / 1_000_000_000.0;
+                let rt = OffsetDateTime::now_utc() - entry_time;
+                let rt = rt.as_seconds_f64();
                 fmt.write_fmt(format_args!("{:.6}", rt))
             }
             FormatText::TimeMillis => {
-                let rt = time::now() - entry_time;
-                let rt = (rt.num_nanoseconds().unwrap_or(0) as f64) / 1_000_000.0;
+                let rt = OffsetDateTime::now_utc() - entry_time;
+                let rt = (rt.whole_nanoseconds() as f64) / 1_000_000.0;
                 fmt.write_fmt(format_args!("{:.6}", rt))
             }
             FormatText::EnvironHeader(ref name) => {
@@ -402,7 +440,7 @@ impl FormatText {
         }
     }
 
-    fn render_request(&mut self, now: time::Tm, req: &ServiceRequest) {
+    fn render_request(&mut self, now: OffsetDateTime, req: &ServiceRequest) {
         match *self {
             FormatText::RequestLine => {
                 *self = if req.query_string().is_empty() {
@@ -424,7 +462,7 @@ impl FormatText {
             }
             FormatText::UrlPath => *self = FormatText::Str(req.path().to_string()),
             FormatText::RequestTime => {
-                *self = FormatText::Str(now.rfc3339().to_string())
+                *self = FormatText::Str(now.format("%Y-%m-%dT%H:%M:%S"))
             }
             FormatText::RequestHeader(ref name) => {
                 let s = if let Some(val) = req.headers().get(name) {
@@ -439,7 +477,16 @@ impl FormatText {
                 *self = FormatText::Str(s.to_string());
             }
             FormatText::RemoteAddr => {
-                let s = if let Some(remote) = req.connection_info().remote() {
+                let s = if let Some(ref peer) = req.connection_info().remote_addr() {
+                    FormatText::Str((*peer).to_string())
+                } else {
+                    FormatText::Str("-".to_string())
+                };
+                *self = s;
+            }
+            FormatText::RealIPRemoteAddr => {
+                let s = if let Some(remote) = req.connection_info().realip_remote_addr()
+                {
                     FormatText::Str(remote.to_string())
                 } else {
                     FormatText::Str("-".to_string())
@@ -452,11 +499,11 @@ impl FormatText {
 }
 
 pub(crate) struct FormatDisplay<'a>(
-    &'a dyn Fn(&mut Formatter) -> Result<(), fmt::Error>,
+    &'a dyn Fn(&mut Formatter<'_>) -> Result<(), fmt::Error>,
 );
 
 impl<'a> fmt::Display for FormatDisplay<'a> {
-    fn fmt(&self, fmt: &mut Formatter) -> Result<(), fmt::Error> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), fmt::Error> {
         (self.0)(fmt)
     }
 }
@@ -464,34 +511,35 @@ impl<'a> fmt::Display for FormatDisplay<'a> {
 #[cfg(test)]
 mod tests {
     use actix_service::{IntoService, Service, Transform};
+    use futures_util::future::ok;
 
     use super::*;
     use crate::http::{header, StatusCode};
-    use crate::test::{block_on, TestRequest};
+    use crate::test::TestRequest;
 
-    #[test]
-    fn test_logger() {
+    #[actix_rt::test]
+    async fn test_logger() {
         let srv = |req: ServiceRequest| {
-            req.into_response(
+            ok(req.into_response(
                 HttpResponse::build(StatusCode::OK)
                     .header("X-Test", "ttt")
                     .finish(),
-            )
+            ))
         };
         let logger = Logger::new("%% %{User-Agent}i %{X-Test}o %{HOME}e %D test");
 
-        let mut srv = block_on(logger.new_transform(srv.into_service())).unwrap();
+        let mut srv = logger.new_transform(srv.into_service()).await.unwrap();
 
         let req = TestRequest::with_header(
             header::USER_AGENT,
             header::HeaderValue::from_static("ACTIX-WEB"),
         )
         .to_srv_request();
-        let _res = block_on(srv.call(req));
+        let _res = srv.call(req).await;
     }
 
-    #[test]
-    fn test_url_path() {
+    #[actix_rt::test]
+    async fn test_url_path() {
         let mut format = Format::new("%T %U");
         let req = TestRequest::with_header(
             header::USER_AGENT,
@@ -500,7 +548,7 @@ mod tests {
         .uri("/test/route/yeah")
         .to_srv_request();
 
-        let now = time::now();
+        let now = OffsetDateTime::now_utc();
         for unit in &mut format.0 {
             unit.render_request(now, &req);
         }
@@ -510,7 +558,7 @@ mod tests {
             unit.render_response(&resp);
         }
 
-        let render = |fmt: &mut Formatter| {
+        let render = |fmt: &mut Formatter<'_>| {
             for unit in &format.0 {
                 unit.render(fmt, 1024, now)?;
             }
@@ -521,17 +569,18 @@ mod tests {
         assert!(s.contains("/test/route/yeah"));
     }
 
-    #[test]
-    fn test_default_format() {
+    #[actix_rt::test]
+    async fn test_default_format() {
         let mut format = Format::default();
 
         let req = TestRequest::with_header(
             header::USER_AGENT,
             header::HeaderValue::from_static("ACTIX-WEB"),
         )
+        .peer_addr("127.0.0.1:8081".parse().unwrap())
         .to_srv_request();
 
-        let now = time::now();
+        let now = OffsetDateTime::now_utc();
         for unit in &mut format.0 {
             unit.render_request(now, &req);
         }
@@ -541,8 +590,8 @@ mod tests {
             unit.render_response(&resp);
         }
 
-        let entry_time = time::now();
-        let render = |fmt: &mut Formatter| {
+        let entry_time = OffsetDateTime::now_utc();
+        let render = |fmt: &mut Formatter<'_>| {
             for unit in &format.0 {
                 unit.render(fmt, 1024, entry_time)?;
             }
@@ -550,16 +599,17 @@ mod tests {
         };
         let s = format!("{}", FormatDisplay(&render));
         assert!(s.contains("GET / HTTP/1.1"));
+        assert!(s.contains("127.0.0.1"));
         assert!(s.contains("200 1024"));
         assert!(s.contains("ACTIX-WEB"));
     }
 
-    #[test]
-    fn test_request_time_format() {
+    #[actix_rt::test]
+    async fn test_request_time_format() {
         let mut format = Format::new("%t");
         let req = TestRequest::default().to_srv_request();
 
-        let now = time::now();
+        let now = OffsetDateTime::now_utc();
         for unit in &mut format.0 {
             unit.render_request(now, &req);
         }
@@ -569,13 +619,47 @@ mod tests {
             unit.render_response(&resp);
         }
 
-        let render = |fmt: &mut Formatter| {
+        let render = |fmt: &mut Formatter<'_>| {
             for unit in &format.0 {
                 unit.render(fmt, 1024, now)?;
             }
             Ok(())
         };
         let s = format!("{}", FormatDisplay(&render));
-        assert!(s.contains(&format!("{}", now.rfc3339())));
+        assert!(s.contains(&now.format("%Y-%m-%dT%H:%M:%S")));
+    }
+
+    #[actix_rt::test]
+    async fn test_remote_addr_format() {
+        let mut format = Format::new("%{r}a");
+
+        let req = TestRequest::with_header(
+            header::FORWARDED,
+            header::HeaderValue::from_static(
+                "for=192.0.2.60;proto=http;by=203.0.113.43",
+            ),
+        )
+        .to_srv_request();
+
+        let now = OffsetDateTime::now_utc();
+        for unit in &mut format.0 {
+            unit.render_request(now, &req);
+        }
+
+        let resp = HttpResponse::build(StatusCode::OK).force_close().finish();
+        for unit in &mut format.0 {
+            unit.render_response(&resp);
+        }
+
+        let entry_time = OffsetDateTime::now_utc();
+        let render = |fmt: &mut Formatter<'_>| {
+            for unit in &format.0 {
+                unit.render(fmt, 1024, entry_time)?;
+            }
+            Ok(())
+        };
+        let s = format!("{}", FormatDisplay(&render));
+        println!("{}", s);
+        assert!(s.contains("192.0.2.60"));
     }
 }

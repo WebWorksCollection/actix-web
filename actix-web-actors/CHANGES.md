@@ -1,5 +1,30 @@
 # Changes
 
+## [Unreleased] - 2020-xx-xx
+
+
+## [3.0.0-beta.1] - 2020-xx-xx
+* Update `actix-web` & `actix-http` dependencies to beta.1
+* Bump minimum supported Rust version to 1.40
+
+
+## [3.0.0-alpha.1] - 2020-05-08
+* Update the actix-web dependency to 3.0.0-alpha.1
+* Update the actix dependency to 0.10.0-alpha.2
+* Update the actix-http dependency to 2.0.0-alpha.3
+
+## [2.0.0] - 2019-12-20
+
+* Release
+
+## [2.0.0-alpha.1] - 2019-12-15
+
+* Migrate to actix-web 2.0.0
+
+## [1.0.4] - 2019-12-07
+
+* Allow comma-separated websocket subprotocols without spaces (#1172)
+
 ## [1.0.3] - 2019-11-14
 
 * Update actix-web and actix-http dependencies

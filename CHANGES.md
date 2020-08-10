@@ -1,5 +1,148 @@
 # Changes
 
+## Unreleased - 2020-xx-xx
+### Changed
+* `PayloadConfig` is now also considered in `Bytes` and `String` extractors when set
+  using `App::data`. [#1610]
+* `web::Path` now has a public representation: `web::Path(pub T)` that enables
+  destructuring. [#1594]
+* `ServiceRequest::app_data` allows retrieval of non-Data data without splitting into parts to
+  access `HttpRequest` which already allows this. [#1618]
+* MSRV is now 1.42.0.
+
+### Fixed
+* Memory leak of app data in pooled requests. [#1609]
+
+[#1594]: https://github.com/actix/actix-web/pull/1594
+[#1609]: https://github.com/actix/actix-web/pull/1609
+[#1610]: https://github.com/actix/actix-web/pull/1610
+[#1618]: https://github.com/actix/actix-web/pull/1610
+
+
+## 3.0.0-beta.1 - 2020-07-13
+### Added
+* Re-export `actix_rt::main` as `actix_web::main`.
+* `HttpRequest::match_pattern` and `ServiceRequest::match_pattern` for extracting the matched
+  resource pattern.
+* `HttpRequest::match_name` and `ServiceRequest::match_name` for extracting matched resource name.
+
+### Changed
+* Fix actix_http::h1::dispatcher so it returns when HW_BUFFER_SIZE is reached. Should reduce peak memory consumption during large uploads. [#1550]
+* Migrate cookie handling to `cookie` crate. Actix-web no longer requires `ring` dependency.
+* MSRV is now 1.41.1
+
+### Fixed
+* `NormalizePath` improved consistency when path needs slashes added _and_ removed.
+
+
+## 3.0.0-alpha.3 - 2020-05-21
+### Added
+* Add option to create `Data<T>` from `Arc<T>` [#1509]
+
+### Changed
+* Resources and Scopes can now access non-overridden data types set on App (or containing scopes) when setting their own data. [#1486]
+* Fix audit issue logging by default peer address [#1485]
+* Bump minimum supported Rust version to 1.40
+* Replace deprecated `net2` crate with `socket2`
+
+[#1485]: https://github.com/actix/actix-web/pull/1485
+[#1509]: https://github.com/actix/actix-web/pull/1509
+
+## [3.0.0-alpha.2] - 2020-05-08
+
+### Changed
+
+* `{Resource,Scope}::default_service(f)` handlers now support app data extraction. [#1452]
+* Implement `std::error::Error` for our custom errors [#1422]
+* NormalizePath middleware now appends trailing / so that routes of form /example/ respond to /example requests. [#1433]
+* Remove the `failure` feature and support.
+
+[#1422]: https://github.com/actix/actix-web/pull/1422
+[#1433]: https://github.com/actix/actix-web/pull/1433
+[#1452]: https://github.com/actix/actix-web/pull/1452
+[#1486]: https://github.com/actix/actix-web/pull/1486
+
+
+## [3.0.0-alpha.1] - 2020-03-11
+
+### Added
+
+* Add helper function for creating routes with `TRACE` method guard `web::trace()`
+* Add convenience functions `test::read_body_json()` and `test::TestRequest::send_request()` for testing.
+
+### Changed
+
+* Use `sha-1` crate instead of unmaintained `sha1` crate
+* Skip empty chunks when returning response from a `Stream` [#1308]
+* Update the `time` dependency to 0.2.7
+* Update `actix-tls` dependency to 2.0.0-alpha.1
+* Update `rustls` dependency to 0.17
+
+[#1308]: https://github.com/actix/actix-web/pull/1308
+
+## [2.0.0] - 2019-12-25
+
+### Changed
+
+* Rename `HttpServer::start()` to `HttpServer::run()`
+
+* Allow to gracefully stop test server via `TestServer::stop()`
+
+* Allow to specify multi-patterns for resources
+
+## [2.0.0-rc] - 2019-12-20
+
+### Changed
+
+* Move `BodyEncoding` to `dev` module #1220
+
+* Allow to set `peer_addr` for TestRequest #1074
+
+* Make web::Data deref to Arc<T> #1214
+
+* Rename `App::register_data()` to `App::app_data()`
+
+* `HttpRequest::app_data<T>()` returns `Option<&T>` instead of `Option<&Data<T>>`
+
+### Fixed
+
+* Fix `AppConfig::secure()` is always false. #1202
+
+
+## [2.0.0-alpha.6] - 2019-12-15
+
+### Fixed
+
+* Fixed compilation with default features off
+
+## [2.0.0-alpha.5] - 2019-12-13
+
+### Added
+
+* Add test server, `test::start()` and `test::start_with()`
+
+## [2.0.0-alpha.4] - 2019-12-08
+
+### Deleted
+
+* Delete HttpServer::run(), it is not useful witht async/await
+
+## [2.0.0-alpha.3] - 2019-12-07
+
+### Changed
+
+* Migrate to tokio 0.2
+
+
+## [2.0.0-alpha.1] - 2019-11-22
+
+### Changed
+
+* Migrated to `std::future`
+
+* Remove implementation of `Responder` for `()`. (#1167)
+
+
 ## [1.0.9] - 2019-11-14
 
 ### Added
